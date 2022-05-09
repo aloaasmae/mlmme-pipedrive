@@ -1,16 +1,20 @@
 # -*- coding: utf-8 -*-
 
 
-
 from __future__ import print_function, division
+
+import datetime
 import os
 import sys
+import time
+
 import torch
 import pandas as pd
 
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 from tqdm import tqdm
 import numpy as np
+
 np.set_printoptions(linewidth=1000)
 import pandas as pd
 from torch.nn.utils.rnn import pad_sequence
@@ -19,98 +23,80 @@ import pathlib
 import collections
 
 
-
-
-
 class Preprocessing:
     def __init__(self):
-        self.batch_size=''
-        self.output_dir =''
-        self.dataset_name =''
+        self.batch_size = ''
+        self.output_dir = ''
+        self.dataset_name = ''
         self.input_path = ''
         self.data_augment = ''
-        self.unique_event =''   #List of events without <EOS>, i.e., [0]
-        self.events = '' # List of events with <EOS>, i.e., [0]
-        self.weights_final ='' #Weights assigned to each event
+        self.unique_event = ''  # List of events without <EOS>, i.e., [0]
+        self.events = ''  # List of events with <EOS>, i.e., [0]
+        self.weights_final = ''  # Weights assigned to each event
         self.desing_matrix = ''
-        self.duration_time_max = ''  #Maximum duration time
-        self.duration_time_min = ''  #minimum duration time (used for normalization)
-        self.average_trace_length =''
-        self.std_trace_length =''
-        self.max_trace_length =''
-        self.activity_freq = ''     #Average and std frequency of an activity per trace. e.g., {6: [1.0003, 0.0163], 7: [1.5367, 0.8242],...}
-        self.desing_matrix_partition_list=''  #This is a list of lists, e.g. [ [[1,3,4],[2,3,1]], [[1,4,3,2,1]],.....] where traces of the same length are grouped (for computing speed up)
+        self.duration_time_max = ''  # Maximum duration time
+        self.duration_time_min = ''  # minimum duration time (used for normalization)
+        self.average_trace_length = ''
+        self.std_trace_length = ''
+        self.max_trace_length = ''
+        self.activity_freq = ''  # Average and std frequency of an activity per trace. e.g., {6: [1.0003, 0.0163], 7: [1.5367, 0.8242],...}
+        self.desing_matrix_partition_list = ''  # This is a list of lists, e.g. [ [[1,3,4],[2,3,1]], [[1,4,3,2,1]],.....] where traces of the same length are grouped (for computing speed up)
         self.prefix_from_begin_partition_list = ''
         self.suffix_to_end_partition_list = ''
         self.case_id_partition_list = ''
         self.duration_time_loc = ''
-        self.selected_columns = ''   #A list shows the index of events and the duration time in the design matrix
+        self.selected_columns = ''  # A list shows the index of events and the duration time in the design matrix
         self.train_suffix_loader_partition_list = ''
         self.test_suffix_loader_partition_list = ''
         self.valid_suffix_loader_partition_list = ''
-
-
-
-
+        self.separation_time = datetime.datetime.fromisoformat('2021-11-23T19:46:48.181')
 
     def read_input_csv(self):
-        '''
+        """
 
         @param input_path: Path to the CSV file
         @return:
-        '''
-        #input_path = '/Users/ftaymouri/Desktop/model temp/CSV/BPI2017.csv'
-        #Reaging files from CSV
+        """
         dat = pd.read_csv(self.input_path)
         print("Types:", dat.dtypes)
-        #changing the data type from integer to category
+        # changing the data type from integer to category
         dat['ActivityID'] = dat['ActivityID'].astype('category')
-        #dat['CompleteTimestamp'] = dat['CompleteTimestamp'].astype('datetime64[ns]')
-        dat['CompleteTimestamp'] = pd.to_datetime(dat['CompleteTimestamp'], dayfirst= True)
+        dat['CompleteTimestamp'] = pd.to_datetime(dat['CompleteTimestamp'], dayfirst=True)
         print("Types after:", dat.dtypes)
 
         print("columns:", dat.columns)
-        dat_group=dat.groupby('CaseID')
+        dat_group = dat.groupby('CaseID')
         print("Original data:", dat.head())
         print("Group by data:", dat_group.head())
 
-        #Data Preparation
-        #Iterating over groups in Pandas dataframe
-        data_augment=pd.DataFrame()
-        dat_group=dat.groupby('CaseID')
+        # Data Preparation
+        # Iterating over groups in Pandas dataframe
+        data_augment = pd.DataFrame()
+        dat_group = dat.groupby('CaseID')
         for name, gr in dat_group:
-          #sorting by time
-          gr = gr.sort_values(['CompleteTimestamp'])
-          #print (gr)
+            # sorting by time
+            gr = gr.sort_values(['CompleteTimestamp'])
+            duration_time = gr.loc[:, 'CompleteTimestamp'].diff() / np.timedelta64(1, 's')
+            # Filling Nan with 0
+            duration_time.iloc[0] = 0
 
-          # dat[dat['CaseID'] == name] = dat[dat['CaseID'] == name].sort_values("CompleteTimestamp")
-          # gr = dat[dat['CaseID'] == name]
-          #computing the duration time in seconds by differecning x[t+1]-x[t]
-          duration_time = gr.loc[:,'CompleteTimestamp'].diff()/np.timedelta64(1,'s')
-          #duration_time = gr.loc[:,'CompleteTimestamp'].diff()/np.timedelta64(1,'D')
-          #Filling Nan with 0
-          duration_time.iloc[0] =0
-          #print ("duration time:\n", duration_time)
+            # computing the remaining time
+            length = duration_time.shape[0]
+            remaining_time = [np.sum(duration_time[i + 1:length]) for i in range(duration_time.shape[0])]
 
-          #computing the remaining time
-          length=duration_time.shape[0]
-          remaining_time = [np.sum(duration_time[i+1:length]) for i in range(duration_time.shape[0])]
-          #print("Time to finish:\n", remaining_time)
+            gr['duration_time'] = duration_time
+            gr['remaining_time'] = remaining_time
 
-          gr['duration_time'] = duration_time
-          gr['remaining_time'] = remaining_time
-
-
-          data_augment = data_augment.append(gr)
-          unique_event = sorted(data_augment['ActivityID'].unique())
+            data_augment = pd.concat([data_augment, gr])
+            unique_event = sorted(data_augment['ActivityID'].unique())
 
         self.data_augment = data_augment
         self.unique_event = unique_event
 
-        #return data_augment, unique_event
 
+        # return data_augment, unique_event
 
-##############################################################################################
+    ##############################################################################################
     def read_input_pickle(self):
         '''
         If you save the results of the above function ('read_input_csv') then you can load it to not run it for the second time.
@@ -119,23 +105,21 @@ class Preprocessing:
         @return:
         '''
 
-
-        data_augment = pickle.load( open( self.input_path, "rb" ) )
-
+        data_augment = pickle.load(open(self.input_path, "rb"))
 
         print(data_augment.shape)
         print(data_augment.head(50))
 
-        #Creating a desing matrix (one hot vectors for activities), End of line (case) is denoted by class 0
+        # Creating a desing matrix (one hot vectors for activities), End of line (case) is denoted by class 0
         unique_event = sorted(data_augment['ActivityID'].unique())
         print("uniqe events:", unique_event)
 
         self.data_augment = data_augment
         self.unique_event = unique_event
 
-        #return data_augment, unique_event
+        # return data_augment, unique_event
 
-##############################################################################################
+    ##############################################################################################
     def __event_to_one_hot(self):
         '''
 
@@ -169,6 +153,7 @@ class Preprocessing:
             temp['class'] = row['ActivityID']
             temp['duration_time'] = row['duration_time']
             temp['remaining_time'] = row['remaining_time']
+            temp['timestamp'] = row['CompleteTimestamp']
             temp['CaseID'] = row['CaseID']
 
             l.append(temp)
@@ -181,22 +166,18 @@ class Preprocessing:
         duration_time_max = desing_matrix['duration_time'].max()
         print("The maximum duration time is:", duration_time_max)
         desing_matrix['duration_time'] = (desing_matrix['duration_time'] - duration_time_min) / (
-                    duration_time_max - duration_time_min)
+                duration_time_max - duration_time_min)
 
         self.desing_matrix = desing_matrix
         self.duration_time_max = duration_time_max
         self.duration_time_min = duration_time_min
-        self. duration_time_loc = desing_matrix.columns.get_loc('duration_time')
+        self.duration_time_loc = desing_matrix.columns.get_loc('duration_time')
         self.selected_columns = [0] + self.unique_event + [self.duration_time_loc]
-        self.events = list(np.arange(0,len(self.unique_event)+1))
+        self.events = list(np.arange(0, len(self.unique_event) + 1))
 
-
-        #return desing_matrix
-
-##############################################################################################
+    ##############################################################################################
     def __log_basic_stats(self):
         group = self.desing_matrix.groupby('CaseID')
-        # Obtaning some statircis
         trace_length_list = [gr.shape[0] for name, gr in group]
         self.average_trace_length = np.mean(trace_length_list)
         self.std_trace_length = np.std(trace_length_list)
@@ -205,8 +186,8 @@ class Preprocessing:
         print("The std of length of traces:", np.std(trace_length_list))
         print("The max of length of traces:", np.max(trace_length_list))
 
-        #---------------------------------------
-        #Average frequency of each activity per trace
+        # ---------------------------------------
+        # Average frequency of each activity per trace
         activity_freq = dict.fromkeys(self.data_augment['ActivityID'].unique())
 
         group = self.data_augment.groupby(['CaseID'])
@@ -224,14 +205,13 @@ class Preprocessing:
         for k in activity_freq:
             activity_freq[k] = [np.round(np.mean(activity_freq[k]), 4), np.round(np.std(activity_freq[k]), 4)]
 
-
         print('Activity frequencies:', activity_freq)
         self.activity_freq = activity_freq
 
-#############################################################################################
-    def __log_partition(self, partition_width =2):
+    #############################################################################################
+    def __log_partition(self, partition_width=2):
         '''
-        Partitionaing the log such that traces with similar sizes are in the same partition
+        Partitioning the log such that traces with similar sizes are in the same partition
         desing_matrix: A pandas data frame
         partition_width: The difference between the longest and shortest trace in a partition
         output: A list of desing matrices
@@ -240,8 +220,6 @@ class Preprocessing:
 
         group = desing_matrix.groupby(['CaseID'])
         trace_length_list = [gr.shape[0] for name, gr in group]
-        # average_trace_length = np.mean(trace_length_list)
-        # std_trace_length = np.std(trace_length_list)
         max_trace_length = np.max(trace_length_list)
         min_trace_length = np.min(trace_length_list)
 
@@ -258,34 +236,21 @@ class Preprocessing:
             for n, g in group:
                 if (g.shape[0] >= lower_ind and g.shape[0] < upper_ind):
                     case_id.append(n)
+            if len(case_id) > 0:
+                desing_matrix_partition_list.append(desing_matrix.loc[(desing_matrix['CaseID'].isin(case_id))])
 
-            desing_matrix_partition_list.append(desing_matrix.loc[(desing_matrix['CaseID'].isin(case_id))])
+        self.desing_matrix_partition_list = desing_matrix_partition_list
 
-        self. desing_matrix_partition_list = desing_matrix_partition_list
 
-        #return desing_matrix_partition_list
-
-################################################################################################
+    ################################################################################################
     def __prefix_suffix_creating(self, prefix=2, mode="event_timestamp_prediction"):
 
         desing_matrix_partition_list = self.desing_matrix_partition_list
-        desing_matrix = self.desing_matrix
-
-        if (mode == "timestamp_prediction"):
-            cls = [desing_matrix_partition_list[0].columns.get_loc('duration_time')]
-        elif (mode == "event_prediction"):
-            cls = [desing_matrix_partition_list[0].columns.get_loc('class')]
-        elif (mode == 'event_timestamp_prediction'):
-            cls = [desing_matrix_partition_list[0].columns.get_loc('duration_time')] + [desing_matrix.columns.get_loc('class')]
-
         prefix_from_begin_partition_list = []
         suffix_to_end_partition_list = []
         case_id_partition_list = []
 
         for desing_matrix in desing_matrix_partition_list:
-            # cls = desing_matrix.columns.get_loc('class')
-            # cls = desing_matrix.columns.get_loc('duration_time')
-            # cls = [desing_matrix.columns.get_loc('duration_time')] + [desing_matrix.columns.get_loc('class')]
             group = desing_matrix.groupby('CaseID')
 
             # Iterating over the groups to create tensors
@@ -297,59 +262,58 @@ class Preprocessing:
                 # For each group, i.e., view, we create a new dataframe and reset the index
                 gr = gr.copy(deep=True)
                 gr = gr.reset_index(drop=True)
+                gr['timestamp'] = pd.to_datetime(gr['timestamp'])
+                prefixes = gr[(gr['timestamp'] < self.separation_time)]
+                if (prefixes.shape[0] == prefix and gr.shape[0] > prefixes.shape[0]):
+                    # adding a new row at the bottom of each case to denote the end of a case
+                    new_row = [0] * gr.shape[1]
+                    gr.loc[gr.shape[0]] = new_row
+                    gr.iloc[gr.shape[0] - 1, gr.columns.get_loc('0')] = 1  # End of line is denoted by class 0
 
-                # adding a new row at the bottom of each case to denote the end of a case
-                new_row = [0] * gr.shape[1]
-                gr.loc[gr.shape[0]] = new_row
-                gr.iloc[gr.shape[0] - 1, gr.columns.get_loc('0')] = 1  # End of line is denoted by class 0
+                    gr_shift = gr.shift(periods=-1, fill_value=0)
+                    gr_shift.loc[gr.shape[0] - 1, '0'] = 1
 
-                gr_shift = gr.shift(periods=-1, fill_value=0)
-                gr_shift.loc[gr.shape[0] - 1, '0'] = 1
-
-                if (gr.shape[0] - 1 > prefix):
                     temp_case_id.append(name)
 
-
+                    gr = gr.drop(['timestamp'], axis=1)
                     temp_prefix.append(
                         torch.tensor(gr.iloc[0:prefix].values, dtype=torch.float, requires_grad=False).cuda())
                     temp_suffix.append(
                         torch.tensor(gr.iloc[prefix:].values, dtype=torch.float, requires_grad=False).cuda())
 
-
-
             try:
-                # This part msakes easier to work afterward
-                temp_prefix = pad_sequence(temp_prefix, batch_first=True, padding_value=0)
-                temp_suffix = pad_sequence(temp_suffix, batch_first=True, padding_value=0)
-
-                prefix_from_begin_partition_list.append(temp_prefix)
-                suffix_to_end_partition_list.append(temp_suffix)
-                case_id_partition_list.append(temp_case_id)
+                if len(temp_prefix) > 0 and len(temp_suffix) > 0:
+                    # This part makes easier to work afterward
+                    temp_prefix = pad_sequence(temp_prefix, batch_first=True, padding_value=0)
+                    temp_suffix = pad_sequence(temp_suffix, batch_first=True, padding_value=0)
+                    prefix_from_begin_partition_list.append(temp_prefix)
+                    suffix_to_end_partition_list.append(temp_suffix)
+                    case_id_partition_list.append(temp_case_id)
 
             except IndexError:
                 pass
-
 
         self.prefix_from_begin_partition_list = prefix_from_begin_partition_list
         self.suffix_to_end_partition_list = suffix_to_end_partition_list
         self.case_id_partition_list = case_id_partition_list
         return prefix_from_begin_partition_list, suffix_to_end_partition_list, case_id_partition_list
 
-###############################################################################################
+    ###############################################################################################
     def __prefix_suffix_variable_length_creating(self):
         '''
         selexting (prefix,suffix) of variable length
         '''
-        desing_matrix_partition_list = self.desing_matrix_partition_list
         max_trace_length = self.max_trace_length
 
         prefix_suffix_dic = {}
         for i in range(2, int(max_trace_length)):
             print("prefix,suffix:", i)
             # Creating prefix and suffix of different length
-            prefix_from_begin_partition_list, suffix_to_end_partition_list, case_id_partition_list = self.__prefix_suffix_creating( prefix=i, mode="event_prediction")
+            prefix_from_begin_partition_list, suffix_to_end_partition_list, case_id_partition_list = self.__prefix_suffix_creating(
+                prefix=i, mode="event_prediction")
 
-            prefix_suffix_dic[i] = (prefix_from_begin_partition_list, suffix_to_end_partition_list, case_id_partition_list)
+            prefix_suffix_dic[i] = (
+                prefix_from_begin_partition_list, suffix_to_end_partition_list, case_id_partition_list)
 
         pr_all = []
         sf_all = []
@@ -359,17 +323,14 @@ class Preprocessing:
             sf_all += prefix_suffix_dic[k][1]
             id_all += prefix_suffix_dic[k][2]
 
-        out = os.path.join(self.output_dir,'prefix_suffix '+self.dataset_name+'.pkl')
-        pickle.dump( (pr_all, sf_all,  id_all), open( out, "wb" ) )
-        # uu = pickle.load(open("/content/drive/My Drive/Deep Learing project/Prefix-suffix BPI12.pkl", "rb"))
-        # prefix_from_begin_partition_list, suffix_to_end_partition_list, case_id_partition_list = uu[0], uu[1], uu[2]
+        out = os.path.join(self.output_dir, 'prefix_suffix_' + self.dataset_name + '.pkl')
+        pickle.dump((pr_all, sf_all, id_all), open(out, "wb"))
 
         self.prefix_from_begin_partition_list = pr_all
         self.suffix_to_end_partition_list = sf_all
         self.case_id_partition_list = id_all
 
-        #return pr_all, sf_all, id_all
-##################################################################################################
+    ##################################################################################################
     def __pad_correction(self):
         suffix_to_end_partition_list = self.suffix_to_end_partition_list
 
@@ -384,8 +345,8 @@ class Preprocessing:
 
         self.suffix_to_end_partition_list = suffix_to_end_partition_list
 
-##################################################################################################
-    def __train_valid_test_loader(self,batch=4):
+    ##################################################################################################
+    def __train_valid_test_loader(self, batch=4):
         '''
         Creating train,test, and validation loaders
         '''
@@ -403,8 +364,6 @@ class Preprocessing:
             suffix_to_end = suffix_to_end_partition_list[i]
             case_id = torch.tensor(case_id_partition_list[i])
 
-
-
             train_inds_suffix = np.arange(0, round(prefix_from_begin.size()[0] * .7))
             validation_inds_suffix = np.arange(round(prefix_from_begin.size()[0] * .7),
                                                round(prefix_from_begin.size()[0] * .8))
@@ -415,7 +374,6 @@ class Preprocessing:
                 test_inds_suffix = train_inds_suffix
                 validation_inds_suffix = train_inds_suffix
                 # continue
-
 
             train_suffix_data = TensorDataset(prefix_from_begin[train_inds_suffix], suffix_to_end[train_inds_suffix],
                                               case_id[train_inds_suffix])
@@ -438,56 +396,58 @@ class Preprocessing:
             self.test_suffix_loader_partition_list = test_suffix_loader_partition_list
             self.valid_suffix_loader_partition_list = valid_suffix_loader_partition_list
 
-
-##################################################################################################
+    ##################################################################################################
     def __weight_of_event(self):
         '''
         This module assigns weights to events
         '''
-        weights_final=[]
+        weights_final = []
         for i in range(len(self.events)):
-          if i == 0:
-            weights_final.append(1)
-          else:
-            weights_final.append(1)
+            if i == 0:
+                weights_final.append(1)
+            else:
+                weights_final.append(1)
 
         self.weights_final = torch.tensor(weights_final).float().cuda()
 
 
 
 
+    def save(self):
+        out = open(os.path.join(os.getcwd(), 'data', self.dataset_name + '.pkl'), "wb")
+        pickle.dump(self.__dict__,  out, 2)
+        out.close()
 
-
-
-    def run(self,input_path, batch_size=128):
+    def run(self, input_path, batch_size=128):
         self.batch_size = batch_size
-        #Creating directory to save results
-        if('/' in input_path):  #For linux
-            splt_char ='/'
-        elif('\\' in input_path): #For windows
+        # Creating directory to save results
+        if ('/' in input_path):  # For linux
+            splt_char = '/'
+        elif ('\\' in input_path):  # For windows
             splt_char = '\\'
         self.dataset_name = input_path.split(splt_char)[-1].split('.')[-2]
-        self.output_dir = os.path.join(os.getcwd(),'results', self.dataset_name)
-        if (not os.path.isdir(os.path.join(os.getcwd(),'results', self.dataset_name))):
+        folder_name = self.dataset_name +"_"+ time.strftime("%Y%m%d-%H%M%S")
+        self.output_dir = os.path.join(os.getcwd(), 'results', folder_name)
+        if not os.path.isdir(os.path.join(os.getcwd(), 'results', folder_name)):
             pathlib.Path(self.output_dir).mkdir(parents=True, exist_ok=True)
 
-
         self.input_path = input_path
-        if(input_path.split('.')[-1] == 'csv'):
+        if (input_path.split('.')[-1] == 'csv'):
             self.read_input_csv()
-        elif(input_path.split('.')[-1] == 'pkl'):
+            # Creating one hot representation
+            self.__event_to_one_hot()
+            self.__log_basic_stats()
+            self.__log_partition()
+            self.__prefix_suffix_variable_length_creating()
+            self.save()
+        elif (input_path.split('.')[-1] == 'pkl'):
             self.read_input_pickle()
-
-        #Creating one hot representation
-        self.__event_to_one_hot()
-        self.__log_basic_stats()
-        #self.__log_partition()
-        #self.__prefix_suffix_variable_length_creating()
-        #-----------
-        out = os.path.join(self.output_dir, 'prefix_suffix ' + self.dataset_name + '.pkl')
-        uu = pickle.load(open(out, "rb"))
-        self.prefix_from_begin_partition_list, self.suffix_to_end_partition_list, self.case_id_partition_list = uu[0], uu[1], uu[2]
-        #-----------
+            # Creating one hot representation
+            self.__event_to_one_hot()
+            self.__log_basic_stats()
+            self.__log_partition()
+            self.__prefix_suffix_variable_length_creating()
+        # -----------
         self.__pad_correction()
         self.__weight_of_event()
         self.__train_valid_test_loader(batch=self.batch_size)
